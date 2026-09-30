@@ -28,7 +28,7 @@ import {
   type TokenUsageInfo,
 } from "@opencode/client/promise"
 import type { BunRequest } from "bun"
-import { Option, Schema } from "effect"
+import { Effect, Option, Schema } from "effect"
 import { ACP } from "../../src/acp/agent"
 
 type DurableEvent = Extract<OpenCodeEvent, { durable: unknown }>
@@ -377,9 +377,8 @@ export async function startWire(options: WireOptions = {}) {
 
   const clientToAgent = new TransformStream<Uint8Array, Uint8Array>()
   const agentToClient = new TransformStream<Uint8Array, Uint8Array>()
-  const agentConnection = ACP.connect(
-    OpenCode.make({ baseUrl: server.url }),
-    ndJsonStream(agentToClient.writable, clientToAgent.readable),
+  const agentConnection = await Effect.runPromise(
+    ACP.connect(OpenCode.make({ baseUrl: server.url }), ndJsonStream(agentToClient.writable, clientToAgent.readable)),
   )
   const clientStream = ndJsonStream(clientToAgent.writable, agentToClient.readable)
   const connection = client({ name: "test" })

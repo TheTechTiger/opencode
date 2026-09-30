@@ -13,6 +13,8 @@ type Options = {
   readonly command?: ReadonlyArray<string>
 }
 
+export type Exit = { readonly code: number } | { readonly signal: string }
+
 const startupDirectory = process.cwd()
 
 function command(password: string, options: Options) {
@@ -53,7 +55,15 @@ const makeEndpoint = Effect.fn("cli.standalone.endpoint")(
       url: ready.url,
       auth: { type: "basic" as const, username: "opencode", password },
       pid: proc.pid,
-    } satisfies Endpoint & { readonly pid: number }
+      exited: proc.exitCode.pipe(
+        Effect.map((code): Exit => ({ code })),
+        Effect.catch((error) =>
+          error.cause instanceof CrossSpawnSpawner.KilledBySignal
+            ? Effect.succeed<Exit>({ signal: error.cause.signal })
+            : Effect.die(error),
+        ),
+      ),
+    } satisfies Endpoint & { readonly pid: number; readonly exited: Effect.Effect<Exit> }
   },
   Effect.provide(LayerNode.compile(CrossSpawnSpawner.node)),
 )
