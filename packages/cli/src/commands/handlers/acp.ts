@@ -1,7 +1,9 @@
 import { ndJsonStream } from "@agentclientprotocol/sdk"
 import { OpenCode } from "@opencode/client/promise"
 import { Service } from "@opencode/client/effect/service"
+import { CrossSpawnSpawner } from "@opencode/util/cross-spawn-spawner"
 import { Effect } from "effect"
+import { Writable } from "node:stream"
 import { ACP } from "../../acp/agent"
 import { Commands } from "../commands"
 import { Runtime } from "../../framework/runtime"
@@ -13,43 +15,26 @@ export default Runtime.handler(
     process.env.OPENCODE_CLIENT = "acp"
     const endpoint = yield* Standalone.start()
     const client = OpenCode.make({ baseUrl: endpoint.url, headers: Service.headers(endpoint) })
-    const output = new WritableStream<Uint8Array>({
-      write: (chunk) =>
-        new Promise<void>((resolve, reject) => {
-          process.stdout.write(chunk, (error) => (error ? reject(error) : resolve()))
+    const connection = yield* ACP.connect(client, ndJsonStream(Writable.toWeb(process.stdout), Bun.stdin.stream()))
+    const code = yield* Effect.raceFirst(
+      Effect.promise(() => connection.closed).pipe(Effect.as(0)),
+      endpoint.exited.pipe(
+        Effect.match({
+          onSuccess: (code) => `code ${code}`,
+          onFailure: (error) =>
+            error.cause instanceof CrossSpawnSpawner.KilledBySignal ? `signal ${error.cause.signal}` : error.message,
         }),
-    })
-    const connection = yield* ACP.connect(client, ndJsonStream(output, yield* stdin))
-    const exited = yield* Effect.raceFirst(
-      Effect.promise(() => connection.closed).pipe(Effect.as(undefined)),
-      endpoint.exited,
+        // stdout carries ACP, so the diagnostic goes to stderr.
+        Effect.flatMap((reason) =>
+          Effect.sync(() => {
+            process.stderr.write(`opencode acp: server exited unexpectedly (${reason})\n`)
+            return 1
+          }),
+        ),
+      ),
     )
-    // EOF owns this stdio process; exiting also closes the private server's lease pipe.
-    if (!exited) return yield* Effect.sync(() => process.exit(0))
-    const reason = "code" in exited ? `code ${exited.code}` : `signal ${exited.signal}`
-    // stdout carries ACP, so the diagnostic goes to stderr.
-    yield* Effect.sync(() => {
-      process.stderr.write(`opencode acp: server exited unexpectedly (${reason})\n`)
-      process.exit(1)
-    })
+    // Closing the handler scope would wait for the private server's graceful shutdown; its lease pipe already
+    // ends the server once this process exits.
+    yield* Effect.sync(() => process.exit(code))
   }),
 )
-
-const stdin = Effect.suspend(() => {
-  const source: { controller?: ReadableStreamDefaultController<Uint8Array> } = {}
-  const data = (chunk: Buffer) => source.controller?.enqueue(new Uint8Array(chunk))
-  const end = () => source.controller?.close()
-  const error = (cause: Error) => source.controller?.error(cause)
-  return Effect.acquireRelease(
-    Effect.sync(() => {
-      const stream = new ReadableStream<Uint8Array>({ start: (controller) => void (source.controller = controller) })
-      process.stdin.on("data", data).on("end", end).on("error", error)
-      return stream
-    }),
-    () =>
-      Effect.sync(() => {
-        process.stdin.off("data", data).off("end", end).off("error", error)
-        process.stdin.pause()
-      }),
-  )
-})

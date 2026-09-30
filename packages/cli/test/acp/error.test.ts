@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { RequestError } from "@agentclientprotocol/sdk"
+import { Cause } from "effect"
 import { ACPError } from "../../src/acp/error"
 import { rpcError, startSession, startWire } from "./wire-fixture"
 
@@ -73,6 +74,9 @@ describe("acp error boundary over the wire", () => {
       message: "Internal error: Internal service failure",
       data: { errorName: "ClientError" },
     })
+    expect(acp.logs.map((log) => ({ message: log.message, cause: Cause.squash(log.cause) }))).toMatchObject([
+      { message: ["ACP request failed"], cause: { name: "ClientError", reason: "UnexpectedStatus" } },
+    ])
   })
 
   test("reports an unavailable server once the server stops", async () => {
@@ -84,5 +88,6 @@ describe("acp error boundary over the wire", () => {
       message: "Internal error: OpenCode server is unavailable",
       data: { errorName: "ServerUnavailable" },
     })
+    expect(acp.logs).toEqual([])
   })
 })

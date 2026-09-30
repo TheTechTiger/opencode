@@ -1,4 +1,4 @@
-import { Service, type Endpoint } from "@opencode/client/effect/service"
+import { Service } from "@opencode/client/effect/service"
 import { CrossSpawnSpawner } from "@opencode/util/cross-spawn-spawner"
 import { LayerNode } from "@opencode/util/effect/layer-node"
 import { Deferred, Effect, Schema, Stream } from "effect"
@@ -12,8 +12,6 @@ const decodeReady = Schema.decodeUnknownPromise(Schema.fromJsonString(Ready))
 type Options = {
   readonly command?: ReadonlyArray<string>
 }
-
-export type Exit = { readonly code: number } | { readonly signal: string }
 
 const startupDirectory = process.cwd()
 
@@ -55,15 +53,8 @@ const makeEndpoint = Effect.fn("cli.standalone.endpoint")(
       url: ready.url,
       auth: { type: "basic" as const, username: "opencode", password },
       pid: proc.pid,
-      exited: proc.exitCode.pipe(
-        Effect.map((code): Exit => ({ code })),
-        Effect.catch((error) =>
-          error.cause instanceof CrossSpawnSpawner.KilledBySignal
-            ? Effect.succeed<Exit>({ signal: error.cause.signal })
-            : Effect.die(error),
-        ),
-      ),
-    } satisfies Endpoint & { readonly pid: number; readonly exited: Effect.Effect<Exit> }
+      exited: proc.exitCode,
+    }
   },
   Effect.provide(LayerNode.compile(CrossSpawnSpawner.node)),
 )
