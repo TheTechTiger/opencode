@@ -97,6 +97,30 @@ OPENCODE_INSTALL_DIR=/usr/local/bin curl -fsSL https://opencode.ai/install | bas
 XDG_BIN_DIR=$HOME/.local/bin curl -fsSL https://opencode.ai/install | bash
 ```
 
+#### Termux (Android)
+
+Termux on 64-bit ARM (`aarch64`) is supported by the same install script:
+
+```bash
+pkg install curl tar
+curl -fsSL https://opencode.ai/install | bash
+```
+
+Notes:
+
+- The installer detects Termux (`$PREFIX`, `uname -o`) and prefers the
+  `linux-arm64-musl` build. It avoids `/tmp` (missing on Termux) by using
+  `$TMPDIR` / `$PREFIX/tmp`, works when `ldd`/`which` are absent, and
+  handles an unset `$SHELL`.
+- Tested on Termux (aarch64, Bionic): the Linux release assets cannot
+  execute directly (`/lib` does not exist under Bionic, and many kernels
+  additionally block them with an Android seccomp filter). After install
+  the script smoke-tests `opencode --version` and prints next steps when
+  the binary does not run. The most reliable path is
+  `proot-distro` (Ubuntu/Debian) with the standard installer inside the
+  distro; `glibc-runner` is kernel-dependent.
+- 32-bit ARM (`armv7l`) is not supported; upstream only ships 64-bit builds.
+
 ### Agents
 
 OpenCode includes two built-in agents you can switch between with the `Tab` key.
