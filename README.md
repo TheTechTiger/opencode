@@ -111,7 +111,7 @@ Notes:
 
 - Termux uses Bionic libc, so the Linux `glibc`/`musl` release assets
   cannot run there. On Termux the installer instead fetches a native
-  bionic `aarch64` build (the `opencode1` family maintained by
+  bionic `aarch64` build (the v2 `opencode` family maintained by
   [Hope2333/opencode-termux](https://github.com/Hope2333/opencode-termux);
   credit also to [guysoft/opencode-termux](https://github.com/guysoft/opencode-termux)
   for pioneering cross-compiled Bun on Android) and installs it as the

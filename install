@@ -91,11 +91,13 @@ fi
 
 # Termux (Android/Bionic) cannot execute the Linux glibc/musl release
 # assets, so it installs a community native bionic build instead:
-# Hope2333/opencode-termux "opencode1" (native bionic, zero glibc deps),
-# published as opencode1_<ver>_aarch64.deb release assets. Credit also to
+# Hope2333/opencode-termux v2 "opencode" (native bionic, zero glibc deps),
+# published as opencode_<ver>_aarch64.deb release assets (the trailing
+# underscore prefix distinguishes them from opencode1_/opencode-glibc_/
+# opencode-wrapper_/opencode-compressed_ families). Credit also to
 # guysoft/opencode-termux for pioneering cross-compiled Bun on Android.
 TERMUX_ANDROID_REPO="Hope2333/opencode-termux"
-TERMUX_ANDROID_ASSET_PREFIX="opencode1_"
+TERMUX_ANDROID_ASSET_PREFIX="opencode_"
 TERMUX_ANDROID_ASSET_SUFFIX="_aarch64.deb"
 
 resolve_termux_android_asset() {
@@ -118,7 +120,7 @@ resolve_termux_android_asset() {
         specific_version="$requested_version"
     else
         # Scan every recent release (newest first, including pre-releases)
-        # and take the highest-versioned opencode1 deb. Take care to drain
+        # and take the highest-versioned v2 opencode deb. Take care to drain
         # every pipe stage fully: with `set -o pipefail', an early-exiting
         # reader (head/awk) would SIGPIPE the writer and kill the script.
         local ver
@@ -167,42 +169,54 @@ install_termux_native() {
     fi
 
     # The deb carries Termux-prefixed paths; locate the payload.
+    # v2 layout: bin/opencode is the real binary (no wrapper needed).
+    # v1 layout (kept as fallback): lib/opencode1/runtime/opencode.
     local payload=""
     local candidate
     for candidate in "$root/data/data/com.termux/files/usr" "$root/usr" "$root"; do
+        if [ -f "$candidate/bin/opencode" ]; then
+            payload="$candidate"
+            break
+        fi
         if [ -f "$candidate/lib/opencode1/runtime/opencode" ]; then
             payload="$candidate"
             break
         fi
     done
     if [ -z "$payload" ]; then
-        echo -e "${RED}Error: unexpected Android package layout (runtime binary not found).${NC}"
+        echo -e "${RED}Error: unexpected Android package layout (opencode binary not found).${NC}"
         exit 1
     fi
 
-    # Flat, self-contained layout under INSTALL_DIR (no $PREFIX writes,
+    # Self-contained layout under INSTALL_DIR (no $PREFIX writes,
     # honours OPENCODE_INSTALL_DIR/XDG_BIN_DIR overrides).
-    cp "$payload/lib/opencode1/runtime/opencode" "$INSTALL_DIR/opencode.bin"
-    chmod 755 "$INSTALL_DIR/opencode.bin"
-    local so
-    for so in "$payload"/lib/opencode/*.so "$payload"/lib/opencode1/*.so; do
-        [ -f "$so" ] || continue
-        cp "$so" "$INSTALL_DIR/"
-    done
-
-    # Launcher: absolute Termux sh baked in at install time.
-    local termux_sh="${PREFIX:-/data/data/com.termux/files/usr}/bin/sh"
-    cat > "$INSTALL_DIR/opencode" <<EOF
+    if [ -f "$payload/bin/opencode" ]; then
+        # v2: direct binary install; drop stale v1 runtime if present.
+        cp "$payload/bin/opencode" "$INSTALL_DIR/opencode"
+        chmod 755 "$INSTALL_DIR/opencode"
+        rm -f "$INSTALL_DIR/opencode.bin"
+    else
+        # v1 fallback: runtime + launcher wrapper.
+        cp "$payload/lib/opencode1/runtime/opencode" "$INSTALL_DIR/opencode.bin"
+        chmod 755 "$INSTALL_DIR/opencode.bin"
+        local termux_sh="${PREFIX:-/data/data/com.termux/files/usr}/bin/sh"
+        cat > "$INSTALL_DIR/opencode" <<EOF
 #!$termux_sh
 # opencode launcher (Termux/Android native bionic build).
-# Native binary packaged by $TERMUX_ANDROID_REPO ("opencode1" family);
+# Native binary packaged by $TERMUX_ANDROID_REPO (v1 "opencode1" family);
 # installed by this fork's installer. Honours OPENCODE_INSTALL_DIR.
 set -e
 dir="\$(cd "\$(dirname "\$0")" && pwd)"
 export LD_LIBRARY_PATH="\$dir\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"
 exec "\$dir/opencode.bin" "\$@"
 EOF
-    chmod 755 "$INSTALL_DIR/opencode"
+        chmod 755 "$INSTALL_DIR/opencode"
+    fi
+    local so
+    for so in "$payload"/lib/opencode/*.so "$payload"/lib/opencode1/*.so; do
+        [ -f "$so" ] || continue
+        cp "$so" "$INSTALL_DIR/"
+    done
     rm -rf "$tmp_dir"
 
     if ! command -v rg >/dev/null 2>&1; then
