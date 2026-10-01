@@ -189,29 +189,31 @@ install_termux_native() {
     fi
 
     # Self-contained layout under INSTALL_DIR (no $PREFIX writes,
-    # honours OPENCODE_INSTALL_DIR/XDG_BIN_DIR overrides).
+    # honours OPENCODE_INSTALL_DIR/XDG_BIN_DIR overrides): launcher wrapper
+    # + real binary + shipped .so files side by side. The wrapper is
+    # required because the binary links libopencode-crhandler.so, which the
+    # linker only finds via LD_LIBRARY_PATH outside the $PREFIX layout.
     if [ -f "$payload/bin/opencode" ]; then
-        # v2: direct binary install; drop stale v1 runtime if present.
-        cp "$payload/bin/opencode" "$INSTALL_DIR/opencode"
-        chmod 755 "$INSTALL_DIR/opencode"
-        rm -f "$INSTALL_DIR/opencode.bin"
+        # v2: binary + launcher wrapper.
+        cp "$payload/bin/opencode" "$INSTALL_DIR/opencode.bin"
+        chmod 755 "$INSTALL_DIR/opencode.bin"
     else
-        # v1 fallback: runtime + launcher wrapper.
+        # v1 fallback: runtime binary.
         cp "$payload/lib/opencode1/runtime/opencode" "$INSTALL_DIR/opencode.bin"
         chmod 755 "$INSTALL_DIR/opencode.bin"
-        local termux_sh="${PREFIX:-/data/data/com.termux/files/usr}/bin/sh"
-        cat > "$INSTALL_DIR/opencode" <<EOF
+    fi
+    local termux_sh="${PREFIX:-/data/data/com.termux/files/usr}/bin/sh"
+    cat > "$INSTALL_DIR/opencode" <<EOF
 #!$termux_sh
 # opencode launcher (Termux/Android native bionic build).
-# Native binary packaged by $TERMUX_ANDROID_REPO (v1 "opencode1" family);
+# Native binary packaged by $TERMUX_ANDROID_REPO;
 # installed by this fork's installer. Honours OPENCODE_INSTALL_DIR.
 set -e
 dir="\$(cd "\$(dirname "\$0")" && pwd)"
 export LD_LIBRARY_PATH="\$dir\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"
 exec "\$dir/opencode.bin" "\$@"
 EOF
-        chmod 755 "$INSTALL_DIR/opencode"
-    fi
+    chmod 755 "$INSTALL_DIR/opencode"
     local so
     for so in "$payload"/lib/opencode/*.so "$payload"/lib/opencode1/*.so; do
         [ -f "$so" ] || continue
