@@ -89,6 +89,121 @@ elif [ "$(uname -o 2>/dev/null || echo unknown)" = "Android" ]; then
     is_termux=true
 fi
 
+# Termux (Android/Bionic) cannot execute the Linux glibc/musl release
+# assets, so it installs a community native bionic build instead:
+# Hope2333/opencode-termux "opencode1" (native bionic, zero glibc deps),
+# published as opencode1_<ver>_aarch64.deb release assets. Credit also to
+# guysoft/opencode-termux for pioneering cross-compiled Bun on Android.
+TERMUX_ANDROID_REPO="Hope2333/opencode-termux"
+TERMUX_ANDROID_ASSET_PREFIX="opencode1_"
+TERMUX_ANDROID_ASSET_SUFFIX="_aarch64.deb"
+
+resolve_termux_android_asset() {
+    # Sets: specific_version, filename, url.
+    local api="https://api.github.com/repos/$TERMUX_ANDROID_REPO/releases?per_page=10"
+    local rel
+    rel=$(curl -fsSL "$api" 2>/dev/null || true)
+    if [ -z "$rel" ]; then
+        echo -e "${RED}Failed to query $TERMUX_ANDROID_REPO releases (network or API limit).${NC}"
+        exit 1
+    fi
+    if [ -n "$requested_version" ]; then
+        requested_version="${requested_version#v}"
+        url=$(printf '%s' "$rel" | grep -o "https://[^\"]*${TERMUX_ANDROID_ASSET_PREFIX}${requested_version}${TERMUX_ANDROID_ASSET_SUFFIX}" | head -n 1 || true)
+        if [ -z "$url" ]; then
+            echo -e "${RED}Error: Android build ${TERMUX_ANDROID_ASSET_PREFIX}${requested_version}${TERMUX_ANDROID_ASSET_SUFFIX} not found.${NC}"
+            echo -e "${MUTED}Available Android builds: https://github.com/$TERMUX_ANDROID_REPO/releases${NC}"
+            exit 1
+        fi
+        specific_version="$requested_version"
+    else
+        # Newest release first in the API list; take the highest-versioned
+        # opencode1 deb from that release.
+        local block
+        block=$(printf '%s' "$rel" | awk '/"tag_name"/{n++} n==1{print} n==2{exit}')
+        url=$(printf '%s' "$block" | grep -o "https://[^\"]*${TERMUX_ANDROID_ASSET_PREFIX}[^\"]*${TERMUX_ANDROID_ASSET_SUFFIX}" | sort -V -u | tail -n 1 || true)
+        if [ -z "$url" ]; then
+            echo -e "${RED}Error: no Android build asset found in the latest $TERMUX_ANDROID_REPO release.${NC}"
+            exit 1
+        fi
+        specific_version=$(printf '%s' "$url" | sed -n "s/.*${TERMUX_ANDROID_ASSET_PREFIX}\(.*\)${TERMUX_ANDROID_ASSET_SUFFIX}/\1/p")
+    fi
+    filename=$(basename "$url")
+}
+
+install_termux_native() {
+    print_message info "\n${MUTED}Installing ${NC}$APP ${MUTED}for Termux/Android (native bionic ${NC}$specific_version${MUTED})${NC}"
+    if ! command -v tar >/dev/null 2>&1; then
+        echo -e "${RED}Error: 'tar' is required but not installed. Install it with: pkg install tar${NC}"
+        exit 1
+    fi
+    if ! command -v xz >/dev/null 2>&1; then
+        echo -e "${RED}Error: 'xz' is required but not installed. Install it with: pkg install xz-utils${NC}"
+        exit 1
+    fi
+    if ! command -v dpkg-deb >/dev/null 2>&1 && ! command -v ar >/dev/null 2>&1; then
+        echo -e "${RED}Error: 'dpkg-deb' or 'ar' is required but neither is installed. Install dpkg with: pkg install dpkg${NC}"
+        exit 1
+    fi
+
+    local tmp_dir
+    tmp_dir="$(resolve_tmp_base)/opencode_install_$$"
+    mkdir -p "$tmp_dir"
+    curl -fSL -o "$tmp_dir/$filename" "$url"
+
+    local root="$tmp_dir/root"
+    mkdir -p "$root"
+    if command -v dpkg-deb >/dev/null 2>&1; then
+        dpkg-deb -x "$tmp_dir/$filename" "$root"
+    else
+        (cd "$tmp_dir" && ar x "$filename")
+        tar -xf "$tmp_dir"/data.tar.* -C "$root"
+    fi
+
+    # The deb carries Termux-prefixed paths; locate the payload.
+    local payload=""
+    local candidate
+    for candidate in "$root/data/data/com.termux/files/usr" "$root/usr" "$root"; do
+        if [ -f "$candidate/lib/opencode1/runtime/opencode" ]; then
+            payload="$candidate"
+            break
+        fi
+    done
+    if [ -z "$payload" ]; then
+        echo -e "${RED}Error: unexpected Android package layout (runtime binary not found).${NC}"
+        exit 1
+    fi
+
+    # Flat, self-contained layout under INSTALL_DIR (no $PREFIX writes,
+    # honours OPENCODE_INSTALL_DIR/XDG_BIN_DIR overrides).
+    cp "$payload/lib/opencode1/runtime/opencode" "$INSTALL_DIR/opencode.bin"
+    chmod 755 "$INSTALL_DIR/opencode.bin"
+    local so
+    for so in "$payload"/lib/opencode/*.so "$payload"/lib/opencode1/*.so; do
+        [ -f "$so" ] || continue
+        cp "$so" "$INSTALL_DIR/"
+    done
+
+    # Launcher: absolute Termux sh baked in at install time.
+    local termux_sh="${PREFIX:-/data/data/com.termux/files/usr}/bin/sh"
+    cat > "$INSTALL_DIR/opencode" <<EOF
+#!$termux_sh
+# opencode launcher (Termux/Android native bionic build).
+# Native binary packaged by $TERMUX_ANDROID_REPO ("opencode1" family);
+# installed by this fork's installer. Honours OPENCODE_INSTALL_DIR.
+set -e
+dir="\$(cd "\$(dirname "\$0")" && pwd)"
+export LD_LIBRARY_PATH="\$dir\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"
+exec "\$dir/opencode.bin" "\$@"
+EOF
+    chmod 755 "$INSTALL_DIR/opencode"
+    rm -rf "$tmp_dir"
+
+    if ! command -v rg >/dev/null 2>&1; then
+        print_message warning "ripgrep not found; install it for full functionality: pkg install ripgrep"
+    fi
+}
+
 # If --binary is provided, skip all download/detection logic
 if [ -n "$binary_path" ]; then
     if [ ! -f "$binary_path" ]; then
@@ -153,16 +268,25 @@ else
           is_musl=true
         fi
       fi
-
-      # Termux uses Bionic libc, not glibc. The musl (statically linked)
-      # build is the most likely to run under Bionic, so prefer it there.
-      # `ldd` is typically absent on Termux, so the check above cannot
-      # trigger on its own.
-      if [ "$is_termux" = "true" ]; then
-        is_musl=true
-      fi
     fi
 
+    # Termux (Android/Bionic) cannot run the Linux glibc or musl release
+    # assets (/lib does not exist; kernels may also seccomp-block them).
+    # Instead it installs a community native bionic build (see below).
+    # Only 64-bit ARM Android builds exist.
+    use_termux_native=false
+    if [ "$is_termux" = "true" ]; then
+      if [ "$os/$arch" != "linux/arm64" ]; then
+        echo -e "${RED}Unsupported Termux Arch: $os/$arch.${NC}"
+        echo -e "${MUTED}Android builds exist only for aarch64 (arm64).${NC}"
+        exit 1
+      fi
+      use_termux_native=true
+      resolve_termux_android_asset
+    fi
+
+    # The Linux/macOS/Windows tarball flow does not apply to Termux native.
+    if [ "$use_termux_native" != "true" ]; then
     needs_baseline=false
     if [ "$arch" = "x64" ]; then
       if [ "$os" = "linux" ]; then
@@ -241,6 +365,7 @@ else
             echo -e "${MUTED}Available releases: https://github.com/anomalyco/opencode/releases${NC}"
             exit 1
         fi
+    fi
     fi
 fi
 
@@ -410,26 +535,16 @@ install_from_binary() {
 }
 
 verify_install() {
-    # Smoke-test the installed binary. Tested on Termux (aarch64, Bionic):
-    # neither the glibc (INTERP /lib/ld-linux-aarch64.so.1) nor the musl
-    # (INTERP /lib/ld-musl-aarch64.so.1) release asset runs directly because
-    # /lib does not exist under Bionic, and on many kernels the glibc binary
-    # additionally hits Android's seccomp filter (SIGSYS/Bad system call).
-    # The installer prefers musl on Termux as the most portable option, but
-    # verify here so a non-working binary produces actionable guidance
-    # instead of silent success.
+    # Smoke-test the installed binary. On Termux this must be the native
+    # bionic build (installed above); the Linux glibc/musl assets cannot
+    # run under Bionic and are never installed there.
     if ! "${INSTALL_DIR}/opencode" --version >/dev/null 2>&1; then
         if [ "${is_termux:-false}" = "true" ]; then
             echo -e "${ORANGE}Warning: the installed opencode binary did not run on Termux.${NC}" >&2
-            echo -e "${MUTED}Termux uses Bionic libc and /lib does not exist, so the Linux${NC}" >&2
-            echo -e "${MUTED}release assets cannot execute directly. Options:${NC}" >&2
-            echo -e "${MUTED}  1. proot-distro (no root needed, most reliable):${NC}" >&2
-            echo -e "${MUTED}       pkg install proot-distro && proot-distro install ubuntu${NC}" >&2
-            echo -e "${MUTED}     then run the standard installer inside the distro.${NC}" >&2
-            echo -e "${MUTED}  2. glibc-runner (for the glibc build, kernel-dependent):${NC}" >&2
-            echo -e "${MUTED}       pkg install glibc-repo glibc-runner && glibc-runner opencode${NC}" >&2
-            echo -e "${MUTED}     On kernels with an Android seccomp filter this still fails${NC}" >&2
-            echo -e "${MUTED}     with 'Bad system call'; use option 1 or an Android-native build.${NC}" >&2
+            echo -e "${MUTED}Please report your device details at:${NC}" >&2
+            echo -e "${MUTED}  https://github.com/TheTechTiger/opencode/issues${NC}" >&2
+            echo -e "${MUTED}Last-resort fallback (needs no root): proot-distro Ubuntu${NC}" >&2
+            echo -e "${MUTED}  pkg install proot-distro && proot-distro install ubuntu${NC}" >&2
         else
             echo -e "${ORANGE}Warning: the installed opencode binary did not run. Check OS/arch compatibility.${NC}" >&2
         fi
@@ -451,7 +566,11 @@ if [ -n "$binary_path" ]; then
     install_from_binary
 else
     check_version
-    download_and_install
+    if [ "${use_termux_native:-false}" = "true" ]; then
+        install_termux_native
+    else
+        download_and_install
+    fi
 fi
 verify_install || true
 

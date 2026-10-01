@@ -99,7 +99,8 @@ XDG_BIN_DIR=$HOME/.local/bin curl -fsSL https://raw.githubusercontent.com/TheTec
 
 #### Termux (Android)
 
-Termux on 64-bit ARM (`aarch64`) is supported by the same install script:
+Termux on 64-bit ARM (`aarch64`) is supported by the same install script,
+with no proot or root required:
 
 ```bash
 pkg install curl tar
@@ -108,18 +109,21 @@ curl -fsSL https://raw.githubusercontent.com/TheTechTiger/opencode/termux-suppor
 
 Notes:
 
-- The installer detects Termux (`$PREFIX`, `uname -o`) and prefers the
-  `linux-arm64-musl` build. It avoids `/tmp` (missing on Termux) by using
-  `$TMPDIR` / `$PREFIX/tmp`, works when `ldd`/`which` are absent, and
-  handles an unset `$SHELL`.
-- Tested on Termux (aarch64, Bionic): the Linux release assets cannot
-  execute directly (`/lib` does not exist under Bionic, and many kernels
-  additionally block them with an Android seccomp filter). After install
-  the script smoke-tests `opencode --version` and prints next steps when
-  the binary does not run. The most reliable path is
-  `proot-distro` (Ubuntu/Debian) with the standard installer inside the
-  distro; `glibc-runner` is kernel-dependent.
-- 32-bit ARM (`armv7l`) is not supported; upstream only ships 64-bit builds.
+- Termux uses Bionic libc, so the Linux `glibc`/`musl` release assets
+  cannot run there. On Termux the installer instead fetches a native
+  bionic `aarch64` build (the `opencode1` family maintained by
+  [Hope2333/opencode-termux](https://github.com/Hope2333/opencode-termux);
+  credit also to [guysoft/opencode-termux](https://github.com/guysoft/opencode-termux)
+  for pioneering cross-compiled Bun on Android) and installs it as the
+  `opencode` command. The Android build version may lag the Linux/macOS
+  releases by a little.
+- The installer avoids `/tmp` (missing on Termux) by using `$TMPDIR` /
+  `$PREFIX/tmp`, works when `ldd`/`which` are absent, and handles an
+  unset `$SHELL`.
+- After install it smoke-tests `opencode --version`. Install `ripgrep`
+  (`pkg install ripgrep`) for full functionality.
+- 32-bit ARM (`armv7l`) is not supported; Android builds exist only for
+  64-bit ARM.
 
 ### Agents
 
