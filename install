@@ -117,16 +117,22 @@ resolve_termux_android_asset() {
         fi
         specific_version="$requested_version"
     else
-        # Newest release first in the API list; take the highest-versioned
-        # opencode1 deb from that release.
-        local block
-        block=$(printf '%s' "$rel" | awk '/"tag_name"/{n++} n==1{print} n==2{exit}')
-        url=$(printf '%s' "$block" | grep -o "https://[^\"]*${TERMUX_ANDROID_ASSET_PREFIX}[^\"]*${TERMUX_ANDROID_ASSET_SUFFIX}" | sort -V -u | tail -n 1 || true)
-        if [ -z "$url" ]; then
-            echo -e "${RED}Error: no Android build asset found in the latest $TERMUX_ANDROID_REPO release.${NC}"
+        # Scan every recent release (newest first, including pre-releases)
+        # and take the highest-versioned opencode1 deb. Take care to drain
+        # every pipe stage fully: with `set -o pipefail', an early-exiting
+        # reader (head/awk) would SIGPIPE the writer and kill the script.
+        local ver
+        ver=$(printf '%s' "$rel" | grep -o "${TERMUX_ANDROID_ASSET_PREFIX}[0-9][^\"]*${TERMUX_ANDROID_ASSET_SUFFIX}" | sed -n "s/^${TERMUX_ANDROID_ASSET_PREFIX}\(.*\)${TERMUX_ANDROID_ASSET_SUFFIX}$/\1/p" | sort -V -u | tail -n 1 || true)
+        if [ -z "$ver" ]; then
+            echo -e "${RED}Error: no Android build asset found in recent $TERMUX_ANDROID_REPO releases.${NC}"
             exit 1
         fi
-        specific_version=$(printf '%s' "$url" | sed -n "s/.*${TERMUX_ANDROID_ASSET_PREFIX}\(.*\)${TERMUX_ANDROID_ASSET_SUFFIX}/\1/p")
+        url=$(printf '%s' "$rel" | grep -o "https://[^\"]*${TERMUX_ANDROID_ASSET_PREFIX}${ver}${TERMUX_ANDROID_ASSET_SUFFIX}" | head -n 1 || true)
+        if [ -z "$url" ]; then
+            echo -e "${RED}Error: no Android build asset found in recent $TERMUX_ANDROID_REPO releases.${NC}"
+            exit 1
+        fi
+        specific_version="$ver"
     fi
     filename=$(basename "$url")
 }
