@@ -65,8 +65,29 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-INSTALL_DIR=$HOME/.opencode/bin
+if [ -n "${OPENCODE_INSTALL_DIR:-}" ]; then
+    INSTALL_DIR="$OPENCODE_INSTALL_DIR"
+elif [ -n "${XDG_BIN_DIR:-}" ]; then
+    INSTALL_DIR="$XDG_BIN_DIR"
+elif [ -d "$HOME/bin" ]; then
+    INSTALL_DIR="$HOME/bin"
+else
+    INSTALL_DIR="$HOME/.opencode/bin"
+fi
 mkdir -p "$INSTALL_DIR"
+
+# Termux detection is needed in both --binary and download paths
+# (post-install verification, tmpdir fallback, dependency hints).
+is_termux=false
+if [ -n "${TERMUX_VERSION:-}" ]; then
+    is_termux=true
+elif [ -n "${PREFIX:-}" ] && [[ "$PREFIX" == *com.termux* ]]; then
+    is_termux=true
+elif [ -d /data/data/com.termux/files/usr ]; then
+    is_termux=true
+elif [ "$(uname -o 2>/dev/null || echo unknown)" = "Android" ]; then
+    is_termux=true
+fi
 
 # If --binary is provided, skip all download/detection logic
 if [ -n "$binary_path" ]; then
@@ -90,6 +111,13 @@ else
     fi
     if [[ "$arch" == "x86_64" ]]; then
       arch="x64"
+    fi
+    # Termux on 32-bit ARM reports armv7l/armv8l; upstream only ships
+    # 64-bit builds, so fail early with a clear message.
+    if [[ "$arch" == armv7l || "$arch" == armv8l || "$arch" == arm ]]; then
+      echo -e "${RED}Unsupported Arch on Termux/Android: $arch (32-bit ARM).${NC}"
+      echo -e "${MUTED}opencode only ships 64-bit (aarch64/arm64) builds.${NC}"
+      exit 1
     fi
 
     if [ "$os" = "darwin" ] && [ "$arch" = "x64" ]; then
@@ -124,6 +152,14 @@ else
         if ldd --version 2>&1 | grep -qi musl; then
           is_musl=true
         fi
+      fi
+
+      # Termux uses Bionic libc, not glibc. The musl (statically linked)
+      # build is the most likely to run under Bionic, so prefer it there.
+      # `ldd` is typically absent on Termux, so the check above cannot
+      # trigger on its own.
+      if [ "$is_termux" = "true" ]; then
+        is_musl=true
       fi
     fi
 
@@ -170,7 +206,11 @@ else
 
     if [ "$os" = "linux" ]; then
         if ! command -v tar >/dev/null 2>&1; then
-             echo -e "${RED}Error: 'tar' is required but not installed.${NC}"
+             if [ "$is_termux" = "true" ]; then
+                 echo -e "${RED}Error: 'tar' is required but not installed. Install it with: pkg install tar${NC}"
+             else
+                 echo -e "${RED}Error: 'tar' is required but not installed.${NC}"
+             fi
              exit 1
         fi
     else
@@ -220,7 +260,7 @@ print_message() {
 
 check_version() {
     if command -v opencode >/dev/null 2>&1; then
-        opencode_path=$(which opencode)
+        opencode_path=$(command -v opencode)
 
         ## Check the installed version
         installed_version=$(opencode --version 2>/dev/null || echo "")
@@ -264,6 +304,22 @@ print_progress() {
     printf "\r${ORANGE}%s%s %3d%%${NC}" "$filled" "$empty" "$percent" >&4
 }
 
+resolve_tmp_base() {
+    # /tmp does not exist on Termux; prefer TMPDIR, then Termux tmp,
+    # then XDG cache, then /tmp as a last resort.
+    if [ -n "${TMPDIR:-}" ] && [ -d "$TMPDIR" ]; then
+        printf '%s' "$TMPDIR"
+    elif [ -n "${PREFIX:-}" ] && [ -d "$PREFIX/tmp" ]; then
+        printf '%s' "$PREFIX/tmp"
+    elif [ -d /data/data/com.termux/files/usr/tmp ]; then
+        printf '%s' /data/data/com.termux/files/usr/tmp
+    elif [ -n "${XDG_CACHE_HOME:-}" ]; then
+        printf '%s' "$XDG_CACHE_HOME"
+    else
+        printf '%s' /tmp
+    fi
+}
+
 download_with_progress() {
     local url="$1"
     local output="$2"
@@ -274,7 +330,8 @@ download_with_progress() {
         exec 4>/dev/null
     fi
 
-    local tmp_dir=${TMPDIR:-/tmp}
+    local tmp_dir
+    tmp_dir=$(resolve_tmp_base)
     local basename="${tmp_dir}/opencode_install_$$"
     local tracefile="${basename}.trace"
 
@@ -326,7 +383,8 @@ download_with_progress() {
 
 download_and_install() {
     print_message info "\n${MUTED}Installing ${NC}opencode ${MUTED}version: ${NC}$specific_version"
-    local tmp_dir="${TMPDIR:-/tmp}/opencode_install_$$"
+    local tmp_dir
+    tmp_dir="$(resolve_tmp_base)/opencode_install_$$"
     mkdir -p "$tmp_dir"
 
     if [[ "$os" == "windows" ]] || ! [ -t 2 ] || ! download_with_progress "$url" "$tmp_dir/$filename"; then
@@ -351,12 +409,51 @@ install_from_binary() {
     chmod 755 "${INSTALL_DIR}/opencode"
 }
 
+verify_install() {
+    # Smoke-test the installed binary. Tested on Termux (aarch64, Bionic):
+    # neither the glibc (INTERP /lib/ld-linux-aarch64.so.1) nor the musl
+    # (INTERP /lib/ld-musl-aarch64.so.1) release asset runs directly because
+    # /lib does not exist under Bionic, and on many kernels the glibc binary
+    # additionally hits Android's seccomp filter (SIGSYS/Bad system call).
+    # The installer prefers musl on Termux as the most portable option, but
+    # verify here so a non-working binary produces actionable guidance
+    # instead of silent success.
+    if ! "${INSTALL_DIR}/opencode" --version >/dev/null 2>&1; then
+        if [ "${is_termux:-false}" = "true" ]; then
+            echo -e "${ORANGE}Warning: the installed opencode binary did not run on Termux.${NC}" >&2
+            echo -e "${MUTED}Termux uses Bionic libc and /lib does not exist, so the Linux${NC}" >&2
+            echo -e "${MUTED}release assets cannot execute directly. Options:${NC}" >&2
+            echo -e "${MUTED}  1. proot-distro (no root needed, most reliable):${NC}" >&2
+            echo -e "${MUTED}       pkg install proot-distro && proot-distro install ubuntu${NC}" >&2
+            echo -e "${MUTED}     then run the standard installer inside the distro.${NC}" >&2
+            echo -e "${MUTED}  2. glibc-runner (for the glibc build, kernel-dependent):${NC}" >&2
+            echo -e "${MUTED}       pkg install glibc-repo glibc-runner && glibc-runner opencode${NC}" >&2
+            echo -e "${MUTED}     On kernels with an Android seccomp filter this still fails${NC}" >&2
+            echo -e "${MUTED}     with 'Bad system call'; use option 1 or an Android-native build.${NC}" >&2
+        else
+            echo -e "${ORANGE}Warning: the installed opencode binary did not run. Check OS/arch compatibility.${NC}" >&2
+        fi
+        return 1
+    fi
+    return 0
+}
+
+if ! command -v curl >/dev/null 2>&1; then
+    if [ "${is_termux:-false}" = "true" ]; then
+        echo -e "${RED}Error: 'curl' is required but not installed. Install it with: pkg install curl${NC}"
+    else
+        echo -e "${RED}Error: 'curl' is required but not installed.${NC}"
+    fi
+    exit 1
+fi
+
 if [ -n "$binary_path" ]; then
     install_from_binary
 else
     check_version
     download_and_install
 fi
+verify_install || true
 
 
 add_to_path() {
@@ -377,7 +474,7 @@ add_to_path() {
 
 XDG_CONFIG_HOME=${XDG_CONFIG_HOME:-$HOME/.config}
 
-current_shell=$(basename "$SHELL")
+current_shell=$(basename "${SHELL:-/bin/sh}")
 case $current_shell in
     fish)
         config_files="$HOME/.config/fish/config.fish"
@@ -408,6 +505,14 @@ if [[ "$no_modify_path" != "true" ]]; then
             break
         fi
     done
+
+    # On Termux (and elsewhere) fish may be installed without an existing
+    # config file; create it so PATH setup is not silently skipped.
+    if [[ -z $config_file && "$current_shell" == "fish" ]]; then
+        config_file="$HOME/.config/fish/config.fish"
+        mkdir -p "$(dirname "$config_file")"
+        touch "$config_file"
+    fi
 
     if [[ -z $config_file ]]; then
         print_message warning "No config file found for $current_shell. You may need to manually add to PATH:"
